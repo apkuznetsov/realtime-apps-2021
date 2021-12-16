@@ -15,29 +15,28 @@
 #include <pthread.h>
 #include <signal.h>
 
-// Возвращает результат функции
-double getFunctionResult(double t);
+// функция из варианта
+double getFunctionResult(double t)
+{
+	return 1.5*(4.8/t-(log(1.5*t))/(4.8*4.8));
+}
 
 int main(int argc, char *argv[]) {
-	// Если не задан адрес именованной памяти, то завершаем выполненние
-	if (argc < 2)
+
+	if (argc < 2)	// если процесс не вызван из другого
 	{
 		std::cout << "Incorrect number of arguments." << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	std::cout << "Module M1 is running" << std::endl;
+	std::cout << "M1 running" << std::endl;
 
 	int const START_TIMER_CODE = -10;
 	int const START_READ_CODE = -11;
 
-	// Получаем id родительского процесса
-	pid_t ppid = getppid();
+	pid_t ppid = getppid();	// pid родительского процесса
 
-	// Размер именнованной памяти
-	size_t sharedMemoryLength = 32;
-
-	// Присоединяем именнованную область к процессу
+	// присоединяем именнованную область памяти к процессу
 	int fd = shm_open("/sharemap", O_CREAT | O_RDWR | O_TRUNC, 0);
 	if (fd == -1)
 	{
@@ -46,9 +45,10 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
+	size_t sharedMemoryLength = 32;	// размер именнованной памяти
 	ftruncate(fd, sharedMemoryLength);
 
-	// Оображаем именованную память в адресное пространство процесса
+	// отображение именованной память в адресное пространство процесса
 	char *addr = (char*)mmap(0, sharedMemoryLength, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	if (addr == MAP_FAILED)
 	{
@@ -66,25 +66,30 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	// Устанавливаем соединение с собственным каналом
+	// устанавливаем соединение с собственным каналом
 	int coid = 0;
-	if ((coid = ConnectAttach(ND_LOCAL_NODE, 0, chid, _NTO_SIDE_CHANNEL, 0)) == -1)
+	if ((coid = ConnectAttach(
+			ND_LOCAL_NODE,		// ID узла в сети (nd=ND_LOCAL_NODE, если узел местный)
+			0,					// ID процесса-сервера
+			chid,				// ID канала сервера
+			_NTO_SIDE_CHANNEL,	// для гарантии создания соединения с требуемым каналом
+			0					// набор флагов, установка которых определяет поведение соединения по отношению к нитям процесса-клиента
+			)) == -1)
 	{
 		std::cout << "The error occurred while connecting to channel." << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	// Тип уведомления таймера
-	struct sigevent event;
+	struct sigevent event;				// уведомления таймера
+	SIGEV_PULSE_INIT(					// уведомление типа импульс
+			&event,
+			coid,						// ID соединения (связи) с каналом, по которому уведомляющий импульс будет посылаться
+			SIGEV_PULSE_PRIO_INHERIT,	// приоритет, связываемый с импульсом, который будет наследоваться нитью, принявшей импульс
+			-1,							// код импульса
+			0);							// значение импульса
 
-	// Инициализируем уведомление типа "Импульс"
-	SIGEV_PULSE_INIT(&event, coid, SIGEV_PULSE_PRIO_INHERIT, -1, 0);
-
-	// Id таймера
-	timer_t timerid;
-
-	// Создаем таймер
+	timer_t timerid; // id таймера
 	if (timer_create(CLOCK_REALTIME, &event, &timerid) == -1)
 	{
 		std::cout << "The error occurred while creating timer." << std::endl;
@@ -92,25 +97,26 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	// Свойства таймера
-	struct itimerspec timer;
-
-	// Задаем свойства таймера
+	struct itimerspec timer;			// свойства таймера
 	timer.it_value.tv_sec = 0;
 	timer.it_value.tv_nsec = 50000000;
 	timer.it_interval.tv_sec = 0;
 	timer.it_interval.tv_nsec = 50000000;
 
-	char msg[32]; // сообщение импульса
-	double functionResult = 0; // результат функции
-	char buffer[sharedMemoryLength]; // буффер для записи результата функции
-	double time = 0; // время
+	char msg[32];								// сообщение импульса
+	double functionResult = 0;					// результат функции
+	char buffer[sharedMemoryLength];			// буфер для записи результата функции
+	double time = 0;							// время
 
-	// Запускаем таймер на запись значения функции в буфер
-	timer_settime(timerid, 0, &timer, NULL);
+	timer_settime(timerid, 0, &timer, NULL);	// запуск таймера на запись значения функции в буфер
 
-	// Отправляем сигнал родительскому процессу о том, что он может запускать таймер
-	if (SignalKill(ND_LOCAL_NODE, ppid, 0, SIGUSR1, START_TIMER_CODE, 0))
+	if (SignalKill(				// отправка сигнала родительскому процессу о том, что он может запускать таймер
+			ND_LOCAL_NODE,		// местный узел
+			ppid,				// ID процесса, которому посылается сигнал
+			0,					// tid задаёт значение ID нити, которой посылается сигнал
+			SIGUSR1,			// системный номер посылаемого сигнала
+			START_TIMER_CODE,	// ассоциируемые с сигналом некоторый код и некоторое значение, позволяющие передать вместе с сигналом дополнительную информацию
+			0))					// значение
 	{
 		std::cout << "The error occurred while sending START_TIMER signal." << std::endl;
 		std::cout << strerror(errno) << std::endl;
@@ -119,20 +125,13 @@ int main(int argc, char *argv[]) {
 
 	while (true)
 	{
-		// Возвращаем результат функции
-		functionResult = getFunctionResult(time);
 
-		// Преобразуем результат функции к строке
-		sprintf(buffer, "%f", functionResult);
+		functionResult = getFunctionResult(time);	// результат функции
+		sprintf(buffer, "%f", functionResult);		// преобразовать в строку
+		strcpy(addr, buffer);						// копировать результат функции в именованную память
 
-		//std::cout << "write: " << buffer << std::endl;
-
-		// Копируем результат функции в именованную память
-		strcpy(addr, buffer);
-
-		if (time == 0)
+		if (time == 0)	// родительский процесс может начинать читать
 		{
-			// Отправляем сигнал родительскому процессу о том, что он может начинать читать
 			if (SignalKill(ND_LOCAL_NODE, ppid, 0, SIGUSR1, START_READ_CODE, 0))
 			{
 				std::cout << "The error occurred while sending READY_TO_START_READ signal." << std::endl;
@@ -141,19 +140,10 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
-		//std::cout << buffer << std::endl;
-
-		// Ожидаем импульс
 		MsgReceivePulse(chid, &msg, sizeof(msg), NULL);
 
-		// Увеличиваем время
-		time += 0.05;
+		time += 0.05;	// увеличиваем время
 	}
 
 	return EXIT_SUCCESS;
-}
-
-double getFunctionResult(double t)
-{
-	return sqrt(1 + 4.2 * t + 1.5 * cos(t));
 }
