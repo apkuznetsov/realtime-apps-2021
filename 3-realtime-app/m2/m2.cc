@@ -18,48 +18,36 @@
 #include <sys/siginfo.h>
 #include <sys/neutrino.h>
 
-volatile bool isReadyToStartTimer = false;	// готов ли процесс запустить таймер
-volatile bool isReadyToStartRead = false;	// готов ли процесс начать чтение
+volatile bool isReadyToStartTimer = false;
+volatile bool isReadyToStartRead = false;
 
-FILE* file;									// файл для записи трендов
+FILE* trendFile;
 
-// ********** ЗАВЕРШИТЬ *****************************
-void terminate(union sigval arg)
+void terminateApp(union sigval arg)
 {
 	std::cout << "Terminate all processes" << std::endl;
 
-	fclose(file);					// закрыть файл трендов
+	fclose(trendFile);
 
-	kill(arg.sival_int, SIGKILL);	// убить того, что послал
-	kill(getpid(), SIGKILL);		// убить текущий процесс
+	kill(arg.sival_int, SIGKILL);	// убить M1
+	kill(getppid(), SIGKILL);		// убить M2
 }
 
-// ********** ЗАПИСЬ ********************************
-void writeToFile(char* functionValue, char* time)
+void writeToTrendFile(char* y, char* x)
 {
-	char text[200] = "";
+	char line[200] = "";
 
-	strcat(text, functionValue);
-	strcat(text, "\t");
-	strcat(text, time);
-	strcat(text, "\n");
+	strcat(line, y);
+	strcat(line, "\t");
+	strcat(line, x);
+	strcat(line, "\n");
 
-	fputs(text, file);
+	fputs(line, trendFile);
 }
 
-// ********** ОБРАБОТЧИК СИГНАЛОВ *******************
-/* Код "int si_code" сигнала, который формируется инициатором сигнала
- * и служит в качестве дополнительной информации,
- * например, для идентификации источника и/или причины посылки сигнала.
- *
- * Значение si_code является 8-разрядным целым со знаком.
- * Важно отметить, что пользовательскими значениями могут быть значения
- * в диапазоне -128 <= si_code <= 0 являются.
- * А вот значения 0 < signo <= 127 являются сугубо системными значениями,
- * генерируемыми ядром, и не могут использоваться пользователями. */
-void handler(int signo, siginfo_t *info, void *over)
+void raiseStartWorkFlags(int signo, siginfo_t *info, void *over)
 {
-	switch (info->si_code)
+	switch (info->si_code)	// si_code – дополнительная информация
 	{
 		case -10:
 			std::cout << "Received signal with code \"READY_TO_START_TIMER\"" << std::endl;
@@ -71,8 +59,9 @@ void handler(int signo, siginfo_t *info, void *over)
 			isReadyToStartRead = true;
 			break;
 
-		default:
+		default:			// коды определяемые программистом от -128 до 0 включительно
 			std::cout << "Received signal with unknown code" << std::endl;
+			break;
 	}
 }
 
@@ -80,208 +69,123 @@ int main(int argc, char *argv[]) {
 
 	std::cout << "M2 running" << std::endl;
 
-	// ********** ДИСПОЗИЦИЯ СИГНАЛА ********************
-	/* Задание диспозиции пользовательского сигнала,
-	 * отвечающего за запуск таймера
-	 * и начало чтения из именованной памяти.
-	 *
-	 * Сигнал SIGUSR1 и SIGUSR2, не инициируемый ядром,
-	 * а только пользователем или прикладным процессом.
-	 *
-	 * Определение обработчика для сигнала SIGUSR1 так,
-	 * что когда он запускается,
-	 * маскируются все сигналы набора.
-	 *
-	 * Механизм надёжных сигналов предоставляет нитям процесса
-	 * возможность блокировать (задерживать) действие сигнала на нить.
-	 *
-	 * Режим учёта поступления сигнала "sa_flags=0" таков,
-	 * что многократное инициирование процессу или нити одного и того же сигнала
-	 * при условии, что сигнал заблокирован
-	 * или нить находится в ожидании выделения процессорного времени,
-	 * оставляет актуальной только одну последнюю инициацию сигнала.
-	 *
-	 * Маска sa_mask используется для блокирования сигналов,
-	 * в течение времени выполнения обработчика сигнала. */
+	sigset_t raiseStartWorkFlagsSigset;			// процесс формирует контролируемый им набор сигналов
+	sigemptyset(&raiseStartWorkFlagsSigset);	// инициализировать набор сигналов, очищая все биты
+	sigaddset(
+			&raiseStartWorkFlagsSigset,			// добавить сигнал, на который будет реагировать процесс
+			SIGUSR1);							// этот сигнал генерируется кодом программиста (не ОС)
 
-	sigset_t signalSet;				// процесс формирует контролируемый им набор сигналов
-	sigemptyset(&signalSet);		// инициализирует набор сигналов, очищая все биты
-	sigaddset(&signalSet, SIGUSR1);	// добавляет сигнал
+	struct sigaction raiseStartWorkFlagsSigact;
+	raiseStartWorkFlagsSigact.sa_flags = 0;							// учитывать только последнюю инициацию сигнала
+	raiseStartWorkFlagsSigact.sa_mask = raiseStartWorkFlagsSigset;	// во время обработки этого сигнала, блокировать получения новых сигналов
+	raiseStartWorkFlagsSigact.sa_sigaction = &raiseStartWorkFlags;	// вызвать этот обработчик, при получении такого сигнала
+	sigaction(
+			SIGUSR1,												// когда приходит этот сигнал (его пошлёт M1)
+			&raiseStartWorkFlagsSigact,								// тогда поднять флаги начала считывания данных
+			NULL);
 
-	struct sigaction act;
-	act.sa_flags = 0;				// учитывать последнюю инициацию сигнала
-	act.sa_mask = signalSet;		// для блокирования сигналов
-	act.sa_sigaction = &handler;	// указатель обработчика сигналов
-	sigaction(SIGUSR1, &act, NULL);	// обработать сигнал
+	int tickSigno;						// номера сигнала, не используется, нужен только для вызова sigwait
+	sigset_t tickSigset;
+	sigemptyset(&tickSigset);
+	sigaddset(&tickSigset, SIGUSR2);
 
-	int signo;						// для номера сигнала
-	sigset_t timerSignalSet;
-	sigemptyset(&timerSignalSet);
-	sigaddset(&timerSignalSet, SIGUSR2);
-
-	// ********** ИМЕННОВАННАЯ ПАМЯТЬ *******************
-	/* Функция shm_open() создаёт и/или присоединяет к процессу
-	 * существующую именованную память с указанным именем
-	 * и возвращает дескриптор именованной памяти как дескриптор файла
-	 * с установленным флагом FD_CLOEXEC.
-	 *
-	 * Аргумент name содержит символьную строку с именем именованной памяти.
-	 * Имя памяти должно начинаться с символа слеш </> и содержать только один слеш.
-	 *
-	 * Режим доступа к содержимому именованной памяти определяется значениями флагов,
-	 * указанных в аргументе oflag.
-	 * Значение oflag формируется операцией поразрядного логического сложения флагов.
-	 *
-	 * O_CREAT - создать новую и/или присоединиться к существующей именованной памяти.
-	 * O_RDWR - открыть для чтения и записи.
-	 * O_TRUNC - если именованная память существует, и она успешно присоединена с флагом O_RDWR,
-	 * то память урезается до нулевой длины, а права доступа владельца и владелец не изменяются.
-	 *
-	 * Аргумент mode используется процессом для формирования прав доступа пользователей
-	 * к создаваемой именованной памяти таким же образом, как при создании обычного файла.
-	 *
-	 * В результате выполнения функции mmap в адресное пространство процесса
-	 * отображается выделенная в пределах именованной памяти с дескриптором fd область,
-	 * начинающаяся со смещением off от её начала и длиною len байтов.
-	 * Доступ к этой области именованной памяти в адресном пространстве процесса
-	 * начинается с адреса, возвращённого функцией mmap().
-	 * Аргумент addr – указывает желательное место в адресном пространстве процесса,
-	 * куда именованная память должна быть отображена.
-	 * Обычно нет необходимости указывать какое-то конкретное значение addr,
-	 * можно просто задать NULL.
-	 * Если устанавливается не NULL , то будет ли объект памяти отображён,
-	 * зависит от того, установлен ли флаг MAP_FIXED в аргументе flags.
-	 *
-	 * Если MAP_FIXED установлен, то область именованной памяти отображается с адреса addr,
-	 * или функция завершается с ошибкой.
-	 * Если MAP_FIXED не установлен, то значение addr рассматривается как желаемый адрес
-	 * начала области доступа к именованной памяти в адресном пространстве процесса,
-	 * но не обязательный и заданное значение addr может быть проигнорировано.
-	 * Аргумент prot определяет порядок использования именованной памяти.
-	 * Можно устанавливать следующие флаги использования (определены в <sys/mman.h>).
-	 * Аргумент prot определяет порядок использования именованной памяти. */
-
-	int fd = shm_open("/sharemap", O_CREAT | O_RDWR | O_TRUNC, 0); // дескриптор памяти
-	if (fd == -1)
+	int sharedmemid = shm_open("/sharemap", O_CREAT | O_RDWR | O_TRUNC, 0);	// создать или присоед. им. память
+	if (sharedmemid == -1)													// если не удалось подключить им. память.
 	{
 		std::cout << "The error occurred while creating share memory" << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
+	size_t sharedmemLen = 32;				// длина в байтах
+	ftruncate(sharedmemid, sharedmemLen);	// установка размера памяти
 
-	size_t sharedMemoryLength = 32;		// длина в байтах
-	ftruncate(fd, sharedMemoryLength);	// установка размера памяти
-
-	// отображаем именованную память в адресное пространство процесса
-	char* addr = (char*)mmap(0, sharedMemoryLength, PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
+	// char* – указатель на последовательность байтов
+	char* addr = (char*)mmap(							// addr – желательное место в адресном пространстве процесса, куда именованная память должна быть отображена
+			0, sharedmemLen, PROT_WRITE | PROT_READ,
+			MAP_SHARED,									// отображаемая область памяти может разделяться с другими процессами
+			sharedmemid, 0);
 	if (addr == MAP_FAILED)
 	{
-		std::cout << "The error occurred while mapping shared memory." << std::endl;
+		std::cout << "The error occurred while mapping shared memory" << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	// ********** ПРОЦЕСС *******************************
-	/* Родительский процесс не блокируется,
-	 * выполняется параллельно с дочерним процессом
-	 * и должен ожидать завершения дочернего процесса. */
-	// запускаем дочерний процесс на основе модуля M1
-	int cid = spawnl(P_NOWAIT, "/home/host/m1/x86/o/m1", "/home/host/m1/x86/o/m1", "/home/host/m1/x86/o/m1", NULL);
-	if (cid == -1)
+	int m1pid = spawnl(
+			P_NOWAIT,					// род. проц. выполняется пар. с дочерним и должен ожидать дочерний проц.
+			"/home/host/m1/x86/o/m1",	// запускаем дочерний процесс на основе модуля M1
+			"/home/host/m1/x86/o/m1", "/home/host/m1/x86/o/m1", NULL);
+	if (m1pid == -1)
 	{
-		std::cout << "The error occurred while starting new process." << std::endl;
+		std::cout << "The error occurred while starting new process" << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	// ********** ТАЙМЕР ********************************
-	/* В случае, когда посылаемый сигнал адресуется процессу без какой-либо дополнительной информации,
-	 * то для настройки уведомления используется макрокоманда SIGEV_SIGNAL_INIT.
-	 *
-	 * CLOCK_REALTIME - стандартный POSIX-определенный тип часов реального времени.
-	 * Таймер должен будет сработать, даже если процессор находится
-	 * в режиме экономии энергопотребления.
-	 *
-	 * Абсолютный таймер всегда однократный. Он посылает уведомление один раз,
-	 * как только текущее значение реального времени окажется не меньше значения,
-	 * указанного в alarm.it_value.
-	 * Значение alarm.it_interval для абсолютного таймера игнорируется.
-	 *
-	 * Чтобы получить относительный периодический таймер, необходимо,
-	 * чтобы значения времени в alarm.it_value и alarm.it_interval были отличны от нуля.
-	 * Таймер первый раз пошлёт уведомление,
-	 * как только истекший интервал реального времени окажется не меньше значения,
-	 * указанного в alarm.it_value, и с этого момента будет периодически посылать уведомления,
-	 * как только истекший с момента предыдущего уведомления интервал реального времени
-	 * окажется не меньше значения, указанного в alarm.it_interval.
-	 *
-	 * Тип уведомления SIGEV_THREAD_INIT предполагает, что в результате срабатывания таймера
-	 * в процессе создаётся новая нить. */
+	struct sigevent tickSigevent;				// уведомления нити о наступлении SIGUSR2
+	SIGEV_SIGNAL_INIT(&tickSigevent, SIGUSR2);	// создать уведомление
 
-	struct sigevent event;				// уведомления нити о наступлении заданного момента времени
-	SIGEV_SIGNAL_INIT(&event, SIGUSR2);	// создание уведомления
-
-	timer_t timerid;					// таймер
-	if (timer_create(CLOCK_REALTIME, &event, &timerid) == -1)
+	timer_t tickTimerid;
+	if (timer_create(CLOCK_REALTIME, &tickSigevent, &tickTimerid) == -1)
 	{
 		std::cout << "The error occurred while creating timer." << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	struct itimerspec timer;			// свойства таймера
-	timer.it_value.tv_sec = 0;			// абсолютный момент времени или период первого уведомления
-	timer.it_value.tv_nsec = 200000000;
-	timer.it_interval.tv_sec = 0;		// период последующих уведомлений
-	timer.it_interval.tv_nsec = 200000000;
+	struct itimerspec tickTimerProps;				// свойства таймера
+	tickTimerProps.it_value.tv_sec = 0;
+	tickTimerProps.it_value.tv_nsec = 200000000;	// период первого уведомления
+	tickTimerProps.it_interval.tv_sec = 0;
+	tickTimerProps.it_interval.tv_nsec = 200000000;	// период последующих уведомлений
 
-	struct sigevent threadEvent;
-	SIGEV_THREAD_INIT(&threadEvent,
-			terminate,					// указатель на функцию, которую нужно запустить как нить
-			cid,						// значение, которое передается функции, запускаемой как нить
+	struct sigevent timeoverEvent;
+	SIGEV_THREAD_INIT(
+			&timeoverEvent,	// событие завершения работы приложения
+			terminateApp,	// указатель на функцию, которую нужно запустить как нить
+			m1pid,			// значение, которое передаётся функции, запускаемой как нить
 			NULL);
 
-	timer_t stopTimerId;
-	if (timer_create(CLOCK_REALTIME, &threadEvent, &stopTimerId) == -1)
+	timer_t timeoverTimerid;
+	if (timer_create(CLOCK_REALTIME, &timeoverEvent, &timeoverTimerid) == -1)
 	{
 		std::cout << "The error occurred while creating timer." << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	struct itimerspec stopTimer;
-	stopTimer.it_value.tv_sec = 57;
-	stopTimer.it_value.tv_nsec = 0;
-	stopTimer.it_interval.tv_sec = 0;
-	stopTimer.it_interval.tv_nsec = 0;
+	struct itimerspec timeoverTimerProps;
+	timeoverTimerProps.it_value.tv_sec = 57;		// сработает через 57 секунд
+	timeoverTimerProps.it_value.tv_nsec = 0;
+	timeoverTimerProps.it_interval.tv_sec = 0;
+	timeoverTimerProps.it_interval.tv_nsec = 0;
 
-	// инициализация до старта отсчёта
-	file = fopen("/home/host/trend", "wt");
-	char bufferFunctionResult[sharedMemoryLength];
-	char bufferTime[sizeof(double)];
-	double time = 0;
+	trendFile = fopen("/home/host/trend", "wt");
+	char y[sharedmemLen];							// считывать в этот массив из именнованой памяти
+	char x[sizeof(double)];							// аргументов функции будет пройденное время
+	double seconds = 0;								// сколько секунд прошло
 
-	while (!isReadyToStartTimer);	// ждать сигнал для запуска таймера
-	timer_settime(					// запускаем таймера считывания значений из именованной память
-			timerid,				// запускаемый таймер
+	while (!isReadyToStartTimer);	// ждать сигнал для запуска таймеров
+
+	timer_settime(					// запустить таймер считывания значений из именованной память
+			tickTimerid,			// запускаемый таймер
 			0,						// относительный таймер
-			&timer,					// установки моментов срабатывания таймера
-			NULL					// возвращает значение предыдущей установки таймера
+			&tickTimerProps,		// установка моментов срабатывания таймера
+			NULL					// не возвращать значение предыдущей установки таймера
 	);
-	timer_settime(					// запускаем таймер на завершение всех процессов
-			stopTimerId, 0, &stopTimer, NULL);
+	timer_settime(timeoverTimerid, 0, &timeoverTimerProps, NULL); // запуcтить отсчёт до завершения работы приложения
 
 	while (true)
 	{
-		while (!isReadyToStartRead);					// ожидание сигнала для чтения первого значения
+		while (!isReadyToStartRead);		// ожидание разрешение от модуля M1 на чтение значения из им. памяти
 
-		strcpy(bufferFunctionResult, addr);				// копируем результат функции в именованную память
-		sprintf(bufferTime, "%f", time);				// преобразовать double в строку
-		writeToFile(bufferFunctionResult, bufferTime);	// записать тренд в файл
+		strcpy(y, addr);					// копировать результат функции из им. памяти
+		sprintf(x, "%f", seconds);			// преобразовать time в строковое представление – получим x
+		writeToTrendFile(y, x);				// записать тренд в файл
 
-		sigwait(&timerSignalSet, &signo);				// ждать сигнал
+		sigwait(&tickSigset, &tickSigno);	// ждать, когда пройдёт 0.2 сек
 
-		time += 0.2;									// увеличить время
+		seconds += 0.2;	// увеличить счётчик прощедших секунд
 	}
 
 	return EXIT_SUCCESS;
