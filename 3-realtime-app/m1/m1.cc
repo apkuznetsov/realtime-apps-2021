@@ -30,6 +30,11 @@ int main(int argc, char *argv[]) {
 
 	std::cout << "M1 running" << std::endl;
 
+	int tickSigno;						// номера сигнала, не используется, нужен только для вызова sigwait
+	sigset_t tickSigset;
+	sigemptyset(&tickSigset);
+	sigaddset(&tickSigset, SIGUSR2);
+
 	int const START_TIMER_CODE = -10;
 	int const START_READ_CODE = -11;
 
@@ -53,54 +58,26 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	int channid;
-	if ((channid = ChannelCreate(0)) == -1)
-	{
-		std::cout << "The error occurred while creating channel" << std::endl;
-		std::cout << strerror(errno) << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	int connid;
-	if ((connid = ConnectAttach(
-			ND_LOCAL_NODE,		// ид узла в сети (nd=ND_LOCAL_NODE, если узел местный)
-			0,					// ид процесса-сервера (M1 будет слать себе же)
-			channid,			// ид канала сервера (M1 будет слать себе же)
-			_NTO_SIDE_CHANNEL,	// для гарантии создания соединения с требуемым каналом
-			0					// набор флагов, установка которых определяет поведение соединения по отношению к нитям процесса-клиента
-			)) == -1)
-	{
-		std::cout << "The error occurred while connecting to channel" << std::endl;
-		std::cout << strerror(errno) << std::endl;
-		return EXIT_FAILURE;
-	}
-
-	struct sigevent tickSigevent;		// уведомления таймера
-	SIGEV_PULSE_INIT(					// уведомление типа импульс
-			&tickSigevent,
-			connid,						// импульс будут слаться по каналу M1 самому процессу M1
-			SIGEV_PULSE_PRIO_INHERIT,	// приоритет по-умолчанию
-			-1,							// код импульса не интересует
-			0);							// значение импульса
+	struct sigevent tickSigevent;				// уведомления нити о наступлении SIGUSR2
+	SIGEV_SIGNAL_INIT(&tickSigevent, SIGUSR2);	// создать уведомление
 
 	timer_t tickTimerid;
-	if (timer_create(CLOCK_REALTIME, &tickSigevent, &tickTimerid) == -1)	// таймер будет слать импульсы
+	if (timer_create(CLOCK_REALTIME, &tickSigevent, &tickTimerid) == -1)
 	{
 		std::cout << "The error occurred while creating timer" << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	struct itimerspec tickTimerProps;
+	struct itimerspec tickTimerProps;				// свойства таймера
 	tickTimerProps.it_value.tv_sec = 0;
-	tickTimerProps.it_value.tv_nsec = 50000000;
+	tickTimerProps.it_value.tv_nsec = 50000000;		// период первого уведомления
 	tickTimerProps.it_interval.tv_sec = 0;
-	tickTimerProps.it_interval.tv_nsec = 50000000;
+	tickTimerProps.it_interval.tv_nsec = 50000000;	// период последующих уведомлений
 
-	char msg[32];				// сообщение импульса
 	double y = 0;
 	char buf[sharedmemLen];
-	double seconds = 0;
+	double seconds = 0.0;
 
 	timer_settime(tickTimerid, 0, &tickTimerProps, NULL);
 
@@ -133,8 +110,7 @@ int main(int argc, char *argv[]) {
 			}
 		}
 
-		// заблокировать M1, пока не получит импульс (а импульс шлёт таймер)
-		MsgReceivePulse(channid, &msg, sizeof(msg), NULL);
+		sigwait(&tickSigset, &tickSigno);	// ждать, когда пройдёт 0.05 сек
 
 		seconds += 0.05;	// увеличиваем время
 	}

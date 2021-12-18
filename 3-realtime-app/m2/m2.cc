@@ -30,7 +30,7 @@ void terminateApp(union sigval arg)
 	fclose(trendFile);
 
 	kill(arg.sival_int, SIGKILL);	// убить M1
-	kill(getppid(), SIGKILL);		// убить M2
+	kill(getpid(), SIGKILL);		// убить M2
 }
 
 void writeToTrendFile(char* y, char* x)
@@ -84,11 +84,6 @@ int main(int argc, char *argv[]) {
 			&raiseStartWorkFlagsSigact,								// тогда поднять флаги начала считывания данных
 			NULL);
 
-	int tickSigno;						// номера сигнала, не используется, нужен только для вызова sigwait
-	sigset_t tickSigset;
-	sigemptyset(&tickSigset);
-	sigaddset(&tickSigset, SIGUSR2);
-
 	int sharedmemid = shm_open("/sharemap", O_CREAT | O_RDWR | O_TRUNC, 0);	// создать или присоед. им. память
 	if (sharedmemid == -1)													// если не удалось подключить им. память.
 	{
@@ -122,22 +117,51 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	struct sigevent tickSigevent;				// уведомления нити о наступлении SIGUSR2
-	SIGEV_SIGNAL_INIT(&tickSigevent, SIGUSR2);	// создать уведомление
-
-	timer_t tickTimerid;
-	if (timer_create(CLOCK_REALTIME, &tickSigevent, &tickTimerid) == -1)
+	int channid;
+	if ((channid = ChannelCreate(0)) == -1)
 	{
-		std::cout << "The error occurred while creating timer." << std::endl;
+		std::cout << "The error occurred while creating channel" << std::endl;
 		std::cout << strerror(errno) << std::endl;
 		return EXIT_FAILURE;
 	}
 
-	struct itimerspec tickTimerProps;				// свойства таймера
+	int connid;
+	if ((connid = ConnectAttach(
+			0,					// ид узла в сети (nd=ND_LOCAL_NODE, если узел местный)
+			0,					// ид процесса-сервера (M1 будет слать себе же)
+			channid,			// ид канала сервера (M1 будет слать себе же)
+			_NTO_SIDE_CHANNEL,	// для гарантии создания соединения с требуемым каналом
+			0					// набор флагов, установка которых определяет поведение соединения по отношению к нитям процесса-клиента
+			)) == -1)
+	{
+		std::cout << "The error occurred while connecting to channel" << std::endl;
+		std::cout << strerror(errno) << std::endl;
+		return EXIT_FAILURE;
+	}
+
+	struct sigevent tickSigevent;		// уведомления таймера
+	SIGEV_PULSE_INIT(					// уведомление типа импульс
+			&tickSigevent,
+			connid,						// импульс будут слаться по каналу M2 самому процессу M2 (нужно для синхронизации)
+			SIGEV_PULSE_PRIO_INHERIT,	// приоритет по-умолчанию
+			-1,							// код импульса не интересует
+			0);							// значение импульса
+
+	timer_t tickTimerid;
+	if (timer_create(CLOCK_REALTIME, &tickSigevent, &tickTimerid) == -1)	// таймер будет слать импульсы
+	{
+		std::cout << "The error occurred while creating timer" << std::endl;
+		std::cout << strerror(errno) << std::endl;
+		return EXIT_FAILURE;
+	}
+
+	struct itimerspec tickTimerProps;
 	tickTimerProps.it_value.tv_sec = 0;
-	tickTimerProps.it_value.tv_nsec = 200000000;	// период первого уведомления
+	tickTimerProps.it_value.tv_nsec = 200000000;
 	tickTimerProps.it_interval.tv_sec = 0;
-	tickTimerProps.it_interval.tv_nsec = 200000000;	// период последующих уведомлений
+	tickTimerProps.it_interval.tv_nsec = 200000000;
+
+	char msg[32];			// сообщение импульса
 
 	struct sigevent timeoverEvent;
 	SIGEV_THREAD_INIT(
@@ -177,13 +201,14 @@ int main(int argc, char *argv[]) {
 
 	while (true)
 	{
-		while (!isReadyToStartRead);		// ожидание разрешение от модуля M1 на чтение значения из им. памяти
+		while (!isReadyToStartRead);		// ожидать разрешение от модуля M1 на чтение значения из им. памяти
 
 		strcpy(y, addr);					// копировать результат функции из им. памяти
 		sprintf(x, "%f", seconds);			// преобразовать time в строковое представление – получим x
 		writeToTrendFile(y, x);				// записать тренд в файл
 
-		sigwait(&tickSigset, &tickSigno);	// ждать, когда пройдёт 0.2 сек
+		// заблокировать M2, пока не получит импульс (а импульс шлёт таймер)
+		MsgReceivePulse(channid, &msg, sizeof(msg), NULL);
 
 		seconds += 0.2;	// увеличить счётчик прощедших секунд
 	}
